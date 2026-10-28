@@ -1,0 +1,194 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<title>Ben – Moléculas! (AR)</title>
+<style>
+  html,body{margin:0;height:100%;overflow:hidden;background:#000;font-family:system-ui,-apple-system,sans-serif}
+  #ar{position:fixed;inset:0}
+  #start{position:fixed;inset:0;z-index:10;display:flex;flex-direction:column;align-items:center;justify-content:center;
+         gap:18px;background:#f6f1df;color:#2f3b2a;text-align:center;padding:24px}
+  #start h1{margin:0;font-size:2.2rem;letter-spacing:.02em}
+  #start p{margin:0;max-width:22rem;line-height:1.4}
+  #start img{width:min(55vw,240px);border-radius:12px;box-shadow:0 4px 18px #0003}
+  button{font:inherit;font-weight:700;border:0;border-radius:999px;padding:14px 28px;background:#5d7a4f;color:#fff;font-size:1.1rem}
+  #hint{position:fixed;left:0;right:0;bottom:20px;z-index:5;text-align:center;color:#fff;text-shadow:0 1px 4px #000;
+        font-size:1rem;pointer-events:none;transition:opacity .3s}
+  #replay{position:fixed;right:16px;bottom:64px;z-index:6;display:none;padding:10px 18px;font-size:.95rem}
+  #loading{display:none}
+</style>
+<script type="importmap">
+{"imports":{
+  "three":"https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+  "three/addons/":"https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/",
+  "mindar-image-three":"https://cdn.jsdelivr.net/npm/mind-ar@1.2.5/dist/mindar-image-three.prod.js"
+}}
+</script>
+</head>
+<body>
+<div id="start">
+  <h1>Moléculas!</h1>
+  <img src="alvo_camisa.jpg" alt="Estampa da camisa">
+  <p>Aponte a câmera para a estampa da camisa e o Ben aparece. Ligue o som do celular.</p>
+  <button id="go">Toque para começar</button>
+  <p id="loading">Carregando…</p>
+</div>
+<div id="ar"></div>
+<div id="hint">Aponte para a estampa da camisa</div>
+<button id="replay">↻ De novo</button>
+
+<script type="module">
+import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { DRACOLoader } from 'three/addons/loaders/DRACOLoader.js';
+import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
+import { MindARThree } from 'mindar-image-three';
+
+const audio = new Audio('moleculas.mp3');
+audio.preload = 'auto';
+const hint = document.getElementById('hint');
+const replayBtn = document.getElementById('replay');
+
+document.getElementById('go').addEventListener('click', async (e) => {
+  e.target.disabled = true;
+  document.getElementById('loading').style.display = 'block';
+  // libera o áudio no iPhone/Android (precisa de um toque)
+  try { await audio.play(); audio.pause(); audio.currentTime = 0; } catch (_) {}
+  try { await start(); document.getElementById('start').remove(); }
+  catch (err) {
+    document.getElementById('loading').textContent = 'Não foi possível abrir a câmera: ' + err.message;
+    e.target.disabled = false;
+  }
+});
+
+async function start() {
+  const mindar = new MindARThree({
+    container: document.getElementById('ar'),
+    imageTargetSrc: 'alvo_camisa.mind',
+    uiScanning: 'no', uiLoading: 'no',
+    filterMinCF: 0.0001, filterBeta: 0.001   // suaviza a tremedeira
+  });
+  const { renderer, scene, camera } = mindar;
+  renderer.outputColorSpace = THREE.SRGBColorSpace;
+
+  const pmrem = new THREE.PMREMGenerator(renderer);
+  scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;   // reflexos (material metálico)
+  scene.add(new THREE.HemisphereLight(0xffffff, 0x556644, 1.2));
+  const sun = new THREE.DirectionalLight(0xffffff, 2.2);
+  sun.position.set(0.5, 1, 1.5);
+  scene.add(sun);
+
+  const anchor = mindar.addAnchor(0);       // a estampa tem largura 1 nesse espaço
+  const stage = new THREE.Group();
+  stage.position.z = 0.12;                  // o Ben "sai" da camisa
+  anchor.group.add(stage);
+
+  // ---- Ben ----
+  const draco = new DRACOLoader();
+  draco.setDecoderPath('https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/libs/draco/gltf/');
+  const loader = new GLTFLoader().setDRACOLoader(draco);
+  const gltf = await loader.loadAsync('ben_ar.glb');
+  const ben = gltf.scene;
+  const holder = new THREE.Group();
+  holder.add(ben);
+  stage.add(holder);
+
+  const mixer = new THREE.AnimationMixer(ben);
+  const actions = gltf.animations.map(clip => {
+    const a = mixer.clipAction(clip);
+    a.setLoop(THREE.LoopOnce); a.clampWhenFinished = true;
+    return a;
+  });
+
+  // mede o Ben já com o esqueleto na pose do 1º quadro e ajusta o tamanho
+  actions.forEach(a => a.play()); mixer.update(0);
+  ben.updateMatrixWorld(true);
+  const box = new THREE.Box3();
+  ben.traverse(o => {
+    if (o.isSkinnedMesh || o.isMesh) {
+      o.computeBoundingBox?.();
+      const bb = (o.boundingBox || o.geometry.boundingBox).clone().applyMatrix4(o.matrixWorld);
+      box.union(bb);
+      o.frustumCulled = false;
+    }
+  });
+  const size = box.getSize(new THREE.Vector3());
+  const s = 0.75 / Math.max(size.x, size.y);           // ocupa ~75% da largura da estampa
+  holder.scale.setScalar(s);
+  const c = box.getCenter(new THREE.Vector3());
+  ben.position.set(-c.x, -c.y, -c.z);
+  console.log('Ben tamanho', size.toArray().map(v => v.toFixed(2)).join(' x '), 'escala', s.toFixed(3));
+  actions.forEach(a => a.stop());
+  const duration = Math.max(...gltf.animations.map(c => c.duration));
+
+  // ---- moléculas de água (O vermelho + 2 H brancos) ----
+  const oGeo = new THREE.SphereGeometry(0.035, 16, 12);
+  const hGeo = new THREE.SphereGeometry(0.022, 12, 8);
+  const oMat = new THREE.MeshStandardMaterial({ color: 0xd8262b, roughness: 0.35 });
+  const hMat = new THREE.MeshStandardMaterial({ color: 0xf2f2f2, roughness: 0.35 });
+  const ang = THREE.MathUtils.degToRad(104.5 / 2), d = 0.045;
+  const mols = [];
+  for (let i = 0; i < 26; i++) {
+    const m = new THREE.Group();
+    m.add(new THREE.Mesh(oGeo, oMat));
+    for (const sgn of [-1, 1]) {
+      const h = new THREE.Mesh(hGeo, hMat);
+      h.position.set(Math.sin(ang) * d * sgn, -Math.cos(ang) * d, 0);
+      m.add(h);
+    }
+    m.userData = {
+      r: 0.38 + Math.random() * 0.32, phase: Math.random() * Math.PI * 2,
+      speed: (0.35 + Math.random() * 0.6) * (Math.random() < .5 ? -1 : 1),
+      y: (Math.random() - 0.5) * 0.8, bob: Math.random() * 6,
+      spin: new THREE.Vector3(Math.random(), Math.random(), Math.random()).multiplyScalar(2),
+      delay: 0.4 + (i / 26) * 5.5                         // vão surgindo aos poucos
+    };
+    m.scale.setScalar(0);
+    stage.add(m);
+    mols.push(m);
+  }
+
+  // ---- controle da cena ----
+  let t = 0, playing = false, visible = false;
+  function restart() {
+    t = 0;
+    actions.forEach(a => { a.reset(); a.play(); });
+    audio.currentTime = 0; audio.play().catch(() => {});
+    playing = true;
+  }
+  anchor.onTargetFound = () => {
+    visible = true; hint.style.opacity = 0; replayBtn.style.display = 'block';
+    if (!playing || t >= duration) restart();
+    else { audio.play().catch(() => {}); }
+  };
+  anchor.onTargetLost = () => {
+    visible = false; hint.style.opacity = 1; replayBtn.style.display = 'none';
+    audio.pause();
+  };
+  replayBtn.addEventListener('click', restart);
+
+  await mindar.start();
+  const clock = new THREE.Clock();
+  renderer.setAnimationLoop(() => {
+    const dt = Math.min(clock.getDelta(), 0.05);
+    if (visible && playing) {
+      t += dt;
+      mixer.update(dt);
+      if (t >= duration) playing = false;
+    }
+    const now = performance.now() / 1000;
+    for (const m of mols) {
+      const u = m.userData;
+      const grow = THREE.MathUtils.clamp((t - u.delay) / 0.4, 0, 1);
+      m.scale.setScalar(grow * (1 + 0.15 * Math.sin(now * 3 + u.bob)));
+      const a = u.phase + now * u.speed;
+      m.position.set(Math.cos(a) * u.r, u.y + Math.sin(now * 1.3 + u.bob) * 0.05, Math.sin(a) * u.r * 0.6);
+      m.rotation.x += u.spin.x * dt; m.rotation.y += u.spin.y * dt; m.rotation.z += u.spin.z * dt;
+    }
+    renderer.render(scene, camera);
+  });
+}
+</script>
+</body>
+</html>
